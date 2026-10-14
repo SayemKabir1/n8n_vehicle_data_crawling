@@ -1,0 +1,265 @@
+{
+  "name": "Vehicle Data Crawling (Portfolio Template)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "549fefe4-f01f-49ee-be44-c078b6edc2d9",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -880,
+        -704
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "/home/node/.n8n-files/input_urls.xlsx",
+        "options": {}
+      },
+      "id": "9624ce30-3e27-416e-a289-4f731c8b3e27",
+      "name": "Read Input Excel",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -656,
+        -704
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -432,
+        -704
+      ],
+      "id": "049d06ec-9b49-40af-828f-b4efb5f9e5f3",
+      "name": "Parse Input URLs"
+    },
+    {
+      "parameters": {
+        "url": "={{$json.URL}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -208,
+        -704
+      ],
+      "id": "7763acd1-5f09-4564-8cf4-8887454d63a9",
+      "name": "Fetch Search Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst html = String($input.first().json.data ?? \"\");\n\n// Extract links from the search page HTML.\nconst matches = html.matchAll(\n  /href\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))/gi\n);\n\nconst hrefs = [...matches].map(m =>\n  (m[1] ?? m[2] ?? m[3]).replace(/&amp;/g, \"&\").trim()\n);\n\nconst uniqueUrls = new Set();\n\nfor (const href of hrefs) {\n  // Keep only individual vehicle detail pages.\n  if (!/\\/usedcar\\/detail\\/[^/?#]+/i.test(href)) {\n    continue;\n  }\n\n  let fullUrl;\n\n  if (/^https?:\\/\\//i.test(href)) {\n    fullUrl = href;\n  } else if (href.startsWith(\"//\")) {\n    fullUrl = \"https:\" + href;\n  } else if (href.startsWith(\"/\")) {\n    fullUrl = \"https://kuruma-ex.jp\" + href;\n  } else {\n    continue;\n  }\n\n  // Only allow the intended website.\n  if (!/^https:\\/\\/kuruma-ex\\.jp\\/usedcar\\/detail\\//i.test(fullUrl)) {\n    continue;\n  }\n\n  uniqueUrls.add(fullUrl);\n}\n\nconst results = [...uniqueUrls].slice(0, 3);\n\nif (results.length === 0) {\n  return [{\n    json: {\n      error: \"No vehicle URLs returned\",\n      hrefCount: hrefs.length,\n      matchingLinks: hrefs.filter(\n        href => /\\/usedcar\\/detail\\//i.test(href)\n      ).slice(0, 1)\n    }\n  }];\n}\n\nreturn results.map(detailUrl => ({\n  json: { detailUrl }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        -704
+      ],
+      "id": "c2bae5ca-8c2e-453a-a9db-1a0d2fe73608",
+      "name": "Extract Vehicle Links",
+      "alwaysOutputData": true,
+      "executeOnce": false,
+      "retryOnFail": false,
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "url": "={{$json.detailUrl}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -832,
+        -416
+      ],
+      "id": "c68a758c-5089-436f-862b-be4f61d5c784",
+      "name": "Fetch Vehicle Detail"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst items = $input.all();\n\nfunction decodeHtml(s) {\n  return s\n    .replace(/&nbsp;|&#160;/gi, \" \")\n    .replace(/&amp;/gi, \"&\")\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#39;|&apos;/gi, \"'\")\n    .replace(/&yen;/gi, \"¥\")\n    .replace(/&#(\\d+);/g, (_, n) =>\n      String.fromCodePoint(Number(n))\n    )\n    .replace(/&#x([0-9a-f]+);/gi, (_, n) =>\n      String.fromCodePoint(parseInt(n, 16))\n    );\n}\n\nfunction extractVehicle(item) {\n  const html = String(item.json.data ?? \"\");\n\n  const text = decodeHtml(\n    html\n      .replace(/<script\\b[\\s\\S]*?<\\/script>/gi, \" \")\n      .replace(/<style\\b[\\s\\S]*?<\\/style>/gi, \" \")\n      .replace(/<[^>]+>/g, \" \")\n  ).replace(/\\s+/g, \" \").trim();\n\n  const titleMatch = html.match(\n    /<title[^>]*>([\\s\\S]*?)<\\/title>/i\n  );\n\n  const vehicleTitle = titleMatch\n    ? decodeHtml(titleMatch[1])\n        .replace(/<[^>]*>/g, \"\")\n        .trim()\n    : \"\";\n\n  const totalMatch =\n    text.match(/支払総額\\s*(?:（税込）|\\(税込\\))?\\s*(?:は|[:：])?\\s*([0-9][0-9,.]*)\\s*万円/i) ||\n    text.match(/支払総額[^0-9]{0,35}([0-9][0-9,.]*)\\s*万円/i);\n\n  const totalPaymentManYen = totalMatch\n    ? Number(totalMatch[1].replace(/,/g, \"\"))\n    : null;\n\n  const totalPaymentJPY = totalPaymentManYen === null\n    ? null\n    : Math.round(totalPaymentManYen * 10000);\n\n  const yearMatch =\n    text.match(/年式\\s*[:：]?\\s*(20\\d{2})年?/i) ||\n    text.match(/(?:^|\\s)(20\\d{2})年\\s*式/);\n\n  const modelYear = yearMatch\n    ? Number(yearMatch[1] ?? yearMatch[2])\n    : null;\n\n  const mileageMatch = text.match(\n    /走行距離\\s*[:：]?\\s*([0-9][0-9,]*)\\s*(?:km|Ｋｍ|キロメートル)/i\n  );\n\n  const mileageKm = mileageMatch\n    ? Number(mileageMatch[1].replace(/,/g, \"\"))\n    : null;\n\n  const repairMatch = text.match(\n    /修復歴\\s*[:：]?\\s*(あり|なし|有|無)/\n  );\n\n  const repairHistory = repairMatch\n    ? repairMatch[1]\n    : null;\n\n  const canonicalMatch =\n    html.match(/<link\\b[^>]*href=[\"']([^\"']+)[\"'][^>]*rel=[\"']canonical[\"']/i) ||\n    html.match(/<link\\b[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']+)[\"']/i);\n\n  const detailUrl = canonicalMatch\n    ? canonicalMatch[1]\n    : null;\n\n  const missingFields = [];\n\n  if (totalPaymentJPY === null) missingFields.push(\"totalPaymentJPY\");\n  if (modelYear === null) missingFields.push(\"modelYear\");\n  if (mileageKm === null) missingFields.push(\"mileageKm\");\n  if (repairHistory === null) missingFields.push(\"repairHistory\");\n\n  return {\n    json: {\n      vehicleTitle,\n      detailUrl,\n      totalPaymentJPY,\n      totalPaymentManYen,\n      modelYear,\n      mileageKm,\n      repairHistory,\n      extractionStatus: missingFields.length === 0 ? \"OK\" : \"Partial\",\n      missingFields\n    }\n  };\n}\n\nreturn items.map(extractVehicle);\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        -416
+      ],
+      "id": "6de3d098-52cc-4879-8728-ff143b9817ba",
+      "name": "Extract Vehicle Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n\nconst brandMap = [\n  [\"メルセデス・ベンツ\", \"Mercedes-Benz\"],\n  [\"メルセデスベンツ\", \"Mercedes-Benz\"],\n  [\"スズキ\", \"Suzuki\"],\n  [\"トヨタ\", \"Toyota\"],\n  [\"ホンダ\", \"Honda\"],\n  [\"ダイハツ\", \"Daihatsu\"],\n  [\"日産\", \"Nissan\"],\n  [\"ニッサン\", \"Nissan\"],\n  [\"マツダ\", \"Mazda\"],\n  [\"スバル\", \"Subaru\"],\n  [\"三菱\", \"Mitsubishi\"],\n  [\"レクサス\", \"Lexus\"],\n  [\"いすゞ\", \"Isuzu\"],\n  [\"光岡\", \"Mitsuoka\"],\n  [\"BMW\", \"BMW\"],\n  [\"ＢＭＷ\", \"BMW\"],\n  [\"MINI\", \"MINI\"]\n];\n\nconst prefectures = [\n  \"北海道\", \"青森県\", \"岩手県\", \"宮城県\", \"秋田県\",\n  \"山形県\", \"福島県\", \"茨城県\", \"栃木県\", \"群馬県\",\n  \"埼玉県\", \"千葉県\", \"東京都\", \"神奈川県\", \"新潟県\",\n  \"富山県\", \"石川県\", \"福井県\", \"山梨県\", \"長野県\",\n  \"岐阜県\", \"静岡県\", \"愛知県\", \"三重県\", \"滋賀県\",\n  \"京都府\", \"大阪府\", \"兵庫県\", \"奈良県\", \"和歌山県\",\n  \"鳥取県\", \"島根県\", \"岡山県\", \"広島県\", \"山口県\",\n  \"徳島県\", \"香川県\", \"愛媛県\", \"高知県\", \"福岡県\",\n  \"佐賀県\", \"長崎県\", \"熊本県\", \"大分県\", \"宮崎県\",\n  \"鹿児島県\", \"沖縄県\"\n];\n\nfunction formatYear(year) {\n  if (!year) return \"\";\n\n  if (year >= 2019) return `${year}年(令和${year - 2018}年)`;\n  if (year >= 1989) return `${year}年(平成${year - 1988}年)`;\n  if (year >= 1926) return `${year}年(昭和${year - 1925}年)`;\n\n  return `${year}年`;\n}\n\nfunction formatMileage(km) {\n  if (km == null || km === \"\") return \"\";\n\n  const value = Number(km);\n  if (!Number.isFinite(value)) return \"\";\n\n  if (value >= 10000) {\n    const man = (value / 10000).toFixed(1).replace(/\\.0$/, \"\");\n    return `${man}万km`;\n  }\n\n  return `${value.toLocaleString(\"en-US\")}km`;\n}\n\nreturn items.map(item => {\n  const data = item.json;\n\n  const rawTitle = String(data.vehicleTitle ?? \"\").trim();\n\n  // Remove the listing description and dealer information\n  // appended to the page title.\n  const title = rawTitle\n    .split(/中古車情報/i)[0]\n    .replace(/[|｜\\s]+$/, \"\")\n    .trim();\n\n  const brandEntry = brandMap.find(([jp]) =>\n    rawTitle.toUpperCase().startsWith(jp.toUpperCase())\n  );\n\n  const brand = brandEntry\n    ? brandEntry[1]\n    : \"\";\n\n  const price = data.totalPaymentManYen == null\n    ? \"\"\n    : `${Number(data.totalPaymentManYen).toLocaleString(\n        \"en-US\",\n        { maximumFractionDigits: 1 }\n      )}万円`;\n\n  const salesArea =\n    prefectures.find(pref => rawTitle.includes(pref)) ?? \"\";\n\n  return {\n    json: {\n      \"Brand\": brand,\n      \"Title\": title,\n      \"URL\": data.detailUrl ?? \"\",\n      \"Price\": price,\n      \"Mileage\": formatMileage(data.mileageKm),\n      \"ModelYear\": formatYear(data.modelYear),\n      \"Repair History\": data.repairHistory ?? \"\",\n      \"Sales Area\": salesArea\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        -416
+      ],
+      "id": "7e1d2d71-69a8-4038-bab1-43ad14dfc5a7",
+      "name": "Format Excel Columns"
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "options": {
+          "fileName": "vehicle_scrape_results.xlsx",
+          "headerRow": true,
+          "sheetName": "Vehicles"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -160,
+        -416
+      ],
+      "id": "49fa212b-f10c-4b9a-9a1c-87e3d723e05f",
+      "name": "Create Excel Report"
+    },
+    {
+      "parameters": {
+        "sendTo": "you@example.com",
+        "subject": "Vehicle Data Report",
+        "message": "Hello, please find the attached Excel file containing the vehicle data. Regards, Sayem",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "data"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        64,
+        -416
+      ],
+      "id": "daf649e6-7933-4ae2-838d-bfc389cfc855",
+      "name": "Send Email"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Input Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Input Excel": {
+      "main": [
+        [
+          {
+            "node": "Parse Input URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Input URLs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Search Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Search Results": {
+      "main": [
+        [
+          {
+            "node": "Extract Vehicle Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Vehicle Links": {
+      "main": [
+        [
+          {
+            "node": "Fetch Vehicle Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Vehicle Detail": {
+      "main": [
+        [
+          {
+            "node": "Extract Vehicle Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Vehicle Fields": {
+      "main": [
+        [
+          {
+            "node": "Format Excel Columns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Excel Columns": {
+      "main": [
+        [
+          {
+            "node": "Create Excel Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Excel Report": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "nodeGroups": [],
+  "tags": []
+}
